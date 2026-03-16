@@ -1,0 +1,443 @@
+#!/bin/bash
+# daily-summary — Summarize git commits across configured repos
+# https://github.com/dvir-highlander/daily-summary
+
+VERSION="1.0.0"
+CONFIG_FILE="$HOME/.daily-summary.conf"
+
+# Help
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  cat <<'HELP'
+daily-summary — Summarize git commits across repos
+
+Usage:
+  daily-summary              Yesterday's commits (raw)
+  daily-summary today        Today's commits (raw)
+  daily-summary 2026-03-12   Specific date (raw / cached)
+  daily-summary --ai         Yesterday's commits (AI-reviewed)
+  daily-summary --ai today   Today's commits (AI-reviewed)
+  daily-summary --refresh    Yesterday's commits (force re-scan)
+  daily-summary --refresh today  Today's commits (force re-scan)
+  daily-summary --week       This week's summaries (Mon-Sun)
+  daily-summary --week last  Last week's summaries
+  daily-summary --list       Browse saved summaries
+  daily-summary --open       Open summaries folder
+  daily-summary --setup      Configure on a new machine
+  daily-summary --version    Show version
+  daily-summary --help       Show this help
+
+Config: ~/.daily-summary.conf
+Output: ~/daily-summaries/YYYY-MM-DD.md
+
+AI mode requires Claude Code CLI (https://claude.ai/code)
+Markdown rendering requires glow (https://github.com/charmbracelet/glow)
+HELP
+  exit 0
+fi
+
+# Version
+if [ "$1" = "--version" ] || [ "$1" = "-v" ]; then
+  echo "daily-summary $VERSION"
+  exit 0
+fi
+
+# List saved summaries (interactive picker)
+if [ "$1" = "--list" ] || [ "$1" = "-l" ]; then
+  if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+  fi
+  DIR=$(eval echo "${OUTPUT_DIR:-~/daily-summaries}")
+
+  if [ ! -d "$DIR" ] || [ -z "$(ls "$DIR"/*.md 2>/dev/null)" ]; then
+    echo "No summaries found in $DIR"
+    exit 0
+  fi
+
+  FILES=()
+  while IFS= read -r f; do
+    FILES+=("$f")
+  done < <(ls -r "$DIR"/*.md 2>/dev/null)
+
+  echo "Saved summaries:"
+  echo ""
+  for i in "${!FILES[@]}"; do
+    DATE=$(basename "${FILES[$i]}" .md)
+    FIRST_LINE=$(head -1 "${FILES[$i]}" | sed 's/^# //')
+    echo "  $((i+1))) $DATE  — $FIRST_LINE"
+  done
+  echo ""
+  read -p "Pick a number (or Enter to cancel): " PICK
+
+  if [ -n "$PICK" ] && [ "$PICK" -ge 1 ] 2>/dev/null && [ "$PICK" -le "${#FILES[@]}" ]; then
+    SELECTED="${FILES[$((PICK-1))]}"
+    echo ""
+    if [ "${USE_GLOW:-false}" = true ] && command -v glow &>/dev/null; then
+      glow "$SELECTED"
+    else
+      cat "$SELECTED"
+    fi
+  fi
+  exit 0
+fi
+
+# Open summaries folder
+if [ "$1" = "--open" ] || [ "$1" = "-o" ]; then
+  if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+  fi
+  DIR=$(eval echo "${OUTPUT_DIR:-~/daily-summaries}")
+  open "$DIR" 2>/dev/null || xdg-open "$DIR" 2>/dev/null || echo "$DIR"
+  exit 0
+fi
+
+# Setup mode
+if [ "$1" = "--setup" ]; then
+  echo "=== daily-summary setup ==="
+  echo ""
+
+  # Git author
+  DEFAULT_EMAIL=$(git config --global user.email 2>/dev/null)
+  echo "Git author email(s) — comma-separated for multiple people."
+  read -p "Email(s) [$DEFAULT_EMAIL]: " INPUT_EMAIL
+  AUTHOR="${INPUT_EMAIL:-$DEFAULT_EMAIL}"
+
+  # Repo directories
+  echo ""
+  echo "Enter parent directories containing git repos (one per line, empty line to finish):"
+  echo "Example: ~/Projects"
+  SCAN_DIRS=()
+  while true; do
+    read -p "> " DIR
+    [ -z "$DIR" ] && break
+    EXPANDED=$(eval echo "$DIR")
+    if [ -d "$EXPANDED" ]; then
+      SCAN_DIRS+=("$DIR")
+      echo "  Added: $DIR"
+    else
+      echo "  Directory not found: $EXPANDED (skipped)"
+    fi
+  done
+
+  if [ ${#SCAN_DIRS[@]} -eq 0 ]; then
+    echo "No directories added. Aborting."
+    exit 1
+  fi
+
+  # Output directory
+  read -p "Output directory [~/daily-summaries]: " INPUT_OUTPUT
+  OUTPUT_DIR="${INPUT_OUTPUT:-~/daily-summaries}"
+
+  # Write config
+  {
+    echo "# daily-summary configuration"
+    echo "# Docs: https://github.com/dvir-highlander/daily-summary"
+    echo ""
+    echo "# Git author email(s) to filter commits"
+    echo "# For multiple authors: AUTHOR=\"alice@co.com,bob@co.com\""
+    echo "AUTHOR=\"$AUTHOR\""
+    echo ""
+    echo "# Where to save markdown summaries"
+    echo "OUTPUT_DIR=\"$OUTPUT_DIR\""
+    echo ""
+    echo "# Render markdown in terminal using glow (brew install glow)"
+    echo "USE_GLOW=false"
+    echo ""
+    echo "# Parent directories to scan for git repos"
+    echo "SCAN_DIRS=("
+    for D in "${SCAN_DIRS[@]}"; do
+      echo "  \"$D\""
+    done
+    echo ")"
+  } > "$CONFIG_FILE"
+
+  echo ""
+  echo "Config saved to $CONFIG_FILE"
+  echo "Run 'daily-summary' to test it."
+  exit 0
+fi
+
+# Load config
+if [ -f "$CONFIG_FILE" ]; then
+  source "$CONFIG_FILE"
+else
+  echo "No config found at $CONFIG_FILE"
+  echo "Run 'daily-summary --setup' to create one."
+  exit 1
+fi
+
+# Expand ~ in config values
+OUTPUT_DIR=$(eval echo "$OUTPUT_DIR")
+
+# Build git --author flags from comma-separated AUTHOR
+build_author_args() {
+  local IFS=','
+  local args=""
+  for email in $AUTHOR; do
+    email=$(echo "$email" | xargs) # trim whitespace
+    args+="--author=$email "
+  done
+  echo "$args"
+}
+AUTHOR_ARGS=$(build_author_args)
+
+# Helper: render a file to terminal
+render_file() {
+  local file="$1"
+  if [ "${USE_GLOW:-false}" = true ] && command -v glow &>/dev/null; then
+    glow "$file"
+  else
+    cat "$file"
+  fi
+}
+
+# --- Week mode ---
+if [ "$1" = "--week" ] || [ "$1" = "-w" ]; then
+  # Find this week's Monday (or last week's)
+  DOW=$(date +%u)  # 1=Mon, 7=Sun
+  DAYS_SINCE_MON=$(( DOW - 1 ))
+  if [ "$2" = "last" ]; then
+    DAYS_BACK=$(( DAYS_SINCE_MON + 7 ))
+  else
+    DAYS_BACK=$DAYS_SINCE_MON
+  fi
+  MON=$(date -v-${DAYS_BACK}d +%Y-%m-%d 2>/dev/null \
+    || date -d "$DAYS_BACK days ago" +%Y-%m-%d)
+
+  echo "Week of $MON:"
+  echo ""
+
+  DAYS=()
+  for i in 0 1 2 3 4 5 6; do
+    DAY=$(date -j -v+${i}d -f "%Y-%m-%d" "$MON" +%Y-%m-%d 2>/dev/null \
+      || date -d "$MON + $i days" +%Y-%m-%d)
+    DAY_NAME=$(date -j -f "%Y-%m-%d" "$DAY" +"%a" 2>/dev/null \
+      || date -d "$DAY" +"%a")
+    DAYS+=("$DAY")
+
+    FILE="$OUTPUT_DIR/${DAY}.md"
+    if [ -f "$FILE" ]; then
+      # Extract TLDR if it exists, otherwise show commit count
+      TLDR=$(grep -m1 '^\*\*TLDR' "$FILE" | sed 's/\*\*TLDR:\*\* //')
+      if [ -z "$TLDR" ]; then
+        TLDR=$(grep -c '^\- ' "$FILE" 2>/dev/null || echo "0")
+        TLDR="$TLDR commits (raw, run --ai to summarize)"
+      fi
+      echo "  $((i+1))) $DAY ($DAY_NAME)  — $TLDR"
+    else
+      # Check if there are commits for this day
+      HAS_COMMITS=false
+      for SCAN_DIR in "${SCAN_DIRS[@]}"; do
+        EXPANDED_DIR=$(eval echo "$SCAN_DIR")
+        [ ! -d "$EXPANDED_DIR" ] && continue
+        for REPO_PATH in "$EXPANDED_DIR"/*/; do
+          [ ! -d "$REPO_PATH/.git" ] && continue
+          COUNT=$(git -C "$REPO_PATH" log --all $AUTHOR_ARGS \
+            --after="${DAY} 00:00" --before="${DAY} 23:59" \
+            --oneline 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$COUNT" -gt 0 ]; then
+            HAS_COMMITS=true
+            break 2
+          fi
+        done
+      done
+
+      if [ "$HAS_COMMITS" = true ]; then
+        echo "  $((i+1))) $DAY ($DAY_NAME)  — (not generated yet)"
+      else
+        echo "  $((i+1))) $DAY ($DAY_NAME)  — no commits"
+      fi
+    fi
+  done
+
+  echo ""
+  read -p "Pick a day to view (or Enter to cancel): " PICK
+
+  if [ -n "$PICK" ] && [ "$PICK" -ge 1 ] 2>/dev/null && [ "$PICK" -le 7 ]; then
+    SELECTED_DATE="${DAYS[$((PICK-1))]}"
+    FILE="$OUTPUT_DIR/${SELECTED_DATE}.md"
+    if [ -f "$FILE" ]; then
+      echo ""
+      render_file "$FILE"
+    else
+      echo ""
+      echo "No summary for $SELECTED_DATE. Generate one with:"
+      echo "  daily-summary $SELECTED_DATE"
+      echo "  daily-summary --ai $SELECTED_DATE"
+    fi
+  fi
+  exit 0
+fi
+
+# Parse flags
+AI_MODE=false
+REFRESH=false
+DATE_ARG=""
+
+for arg in "$@"; do
+  case "$arg" in
+    --ai)      AI_MODE=true ;;
+    --refresh) REFRESH=true ;;
+    *)         DATE_ARG="$arg" ;;
+  esac
+done
+
+# Determine which day to summarize
+case "$DATE_ARG" in
+  today)   TARGET_DATE=$(date +%Y-%m-%d) ;;
+  "")      TARGET_DATE=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d "yesterday" +%Y-%m-%d) ;;
+  *)       TARGET_DATE="$DATE_ARG" ;;
+esac
+
+# Date display (macOS vs Linux)
+DISPLAY_DATE=$(date -j -f "%Y-%m-%d" "$TARGET_DATE" +"%A, %B %d %Y" 2>/dev/null \
+  || date -d "$TARGET_DATE" +"%A, %B %d %Y" 2>/dev/null \
+  || echo "$TARGET_DATE")
+
+OUTPUT_FILE="$OUTPUT_DIR/${TARGET_DATE}.md"
+mkdir -p "$OUTPUT_DIR"
+
+# If file already exists and not refreshing or AI mode, just show it
+if [ -f "$OUTPUT_FILE" ] && [ "$AI_MODE" = false ] && [ "$REFRESH" = false ]; then
+  echo ""
+  render_file "$OUTPUT_FILE"
+  echo ""
+  echo "Saved to: $OUTPUT_FILE"
+  echo "(Run with --ai to regenerate with AI review, --refresh to re-scan)"
+  exit 0
+fi
+
+# Collect raw data from all repos
+RAW_COMMITS=""
+RAW_DIFFS=""
+TOTAL_COMMITS=0
+FOUND_ANY=false
+
+for SCAN_DIR in "${SCAN_DIRS[@]}"; do
+  EXPANDED_DIR=$(eval echo "$SCAN_DIR")
+  [ ! -d "$EXPANDED_DIR" ] && continue
+
+  for REPO_PATH in "$EXPANDED_DIR"/*/; do
+    [ ! -d "$REPO_PATH/.git" ] && continue
+
+    REPO_NAME=$(basename "$REPO_PATH")
+
+    COMMITS=$(git -C "$REPO_PATH" log --all $AUTHOR_ARGS \
+      --after="${TARGET_DATE} 00:00" --before="${TARGET_DATE} 23:59" \
+      --pretty=format:"%h %s" 2>/dev/null \
+      | grep -viE '^[a-f0-9]+ (WIP|wip|fixup|update plan|update tracker|index on |WIP on )' )
+
+    if [ -n "$COMMITS" ]; then
+      COUNT=$(echo "$COMMITS" | wc -l | tr -d ' ')
+      TOTAL_COMMITS=$((TOTAL_COMMITS + COUNT))
+      FOUND_ANY=true
+
+      RAW_COMMITS+="### $REPO_NAME ($COUNT commits)
+$COMMITS
+
+"
+
+      # For AI mode, also collect file-level diffs
+      if [ "$AI_MODE" = true ]; then
+        DIFF=$(git -C "$REPO_PATH" log --all $AUTHOR_ARGS \
+          --after="${TARGET_DATE} 00:00" --before="${TARGET_DATE} 23:59" \
+          --pretty=format:"--- commit %h: %s ---" --stat 2>/dev/null)
+
+        RAW_DIFFS+="### $REPO_NAME
+$DIFF
+
+"
+      fi
+    fi
+  done
+done
+
+if [ "$FOUND_ANY" = false ]; then
+  {
+    echo "# Daily Summary — $DISPLAY_DATE"
+    echo ""
+    echo "*No commits found for $DISPLAY_DATE.*"
+  } > "$OUTPUT_FILE"
+  echo ""
+  cat "$OUTPUT_FILE"
+  echo ""
+  echo "Saved to: $OUTPUT_FILE"
+  exit 0
+fi
+
+# --- AI Mode: send to Claude for summarization ---
+if [ "$AI_MODE" = true ]; then
+  if ! command -v claude &>/dev/null; then
+    echo "Error: 'claude' CLI not found. Install Claude Code (https://claude.ai/code) or use without --ai flag."
+    exit 1
+  fi
+
+  echo "Analyzing $TOTAL_COMMITS commits with AI..."
+  echo ""
+
+  PROMPT="You are summarizing a developer's daily work. Date: $DISPLAY_DATE.
+
+IMPORTANT: Do NOT output any title or heading. Start directly with the TLDR line. I will add the title myself.
+
+Output this exact structure (no changes, no extra headings):
+
+**TLDR:** <one sentence — what was the main focus today>
+
+## What I worked on
+<Group related commits into 2-4 logical themes. For each theme:>
+- **<Theme name>** — <1-2 sentences explaining what was done and why> (\`hash1\`, \`hash2\`)
+
+## Key changes
+<The most important technical details, 3-6 bullets max:>
+- <what changed and its impact>
+
+---
+
+Rules:
+- Do NOT add a title or date heading — I handle that
+- Each bullet in 'What I worked on' MUST end with the relevant short commit hashes in backtick-wrapped inline code, e.g. (\`a19546d8\`, \`cdb33e83\`)
+- Skip WIP, stash, and merge commits unless they are the only work
+- Keep it short — this is for a personal daily log, not a PR description
+- Do NOT include a separate 'Commits' section — the hashes are inline
+- Group by WHAT was accomplished, not by repo
+- No filler words
+
+## Raw data
+### Commits
+$RAW_COMMITS
+
+### File changes
+$RAW_DIFFS"
+
+  AI_SUMMARY=$(echo "$PROMPT" | claude -p --model haiku 2>/dev/null)
+
+  if [ $? -eq 0 ] && [ -n "$AI_SUMMARY" ]; then
+    {
+      echo "# Daily Summary — $DISPLAY_DATE"
+      echo ""
+      echo "$AI_SUMMARY"
+      echo ""
+      echo "---"
+      echo "*AI-reviewed summary of $TOTAL_COMMITS commits*"
+    } > "$OUTPUT_FILE"
+  else
+    echo "AI summarization failed. Falling back to raw output."
+    AI_MODE=false
+  fi
+fi
+
+# --- Raw mode (or AI fallback) ---
+if [ "$AI_MODE" = false ]; then
+  {
+    echo "# Daily Summary — $DISPLAY_DATE"
+    echo ""
+    echo "$RAW_COMMITS" | sed 's/^### /## /; s/^[a-f0-9]\{7\} /- /'
+    echo "---"
+    echo "**Total: $TOTAL_COMMITS commits**"
+  } > "$OUTPUT_FILE"
+fi
+
+# Print to terminal
+echo ""
+render_file "$OUTPUT_FILE"
+echo ""
+echo "Saved to: $OUTPUT_FILE"
