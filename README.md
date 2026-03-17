@@ -1,4 +1,4 @@
-# daily-summary
+# Daily-Summary
 
 A CLI tool that summarizes your daily git commits across multiple repositories. Optionally uses AI ([Claude Code](https://claude.ai/code)) to generate human-readable summaries from your actual code changes.
 
