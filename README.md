@@ -1,11 +1,25 @@
 # Daily-Summary
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#requirements)
+[![Shell](https://img.shields.io/badge/shell-bash-green.svg)](daily-summary)
+[![AI Powered](https://img.shields.io/badge/AI-Claude%20Code-blueviolet.svg)](https://claude.ai/code)
+
 A CLI tool that summarizes your daily git commits across multiple repositories. Optionally uses AI ([Claude Code](https://claude.ai/code)) to generate human-readable summaries from your actual code changes.
 
 Works with local commits — no need to push first.
 
 <!-- Terminal demo GIF: record with `vhs` (brew install vhs) using demo.tape -->
 <!-- ![demo](assets/demo.gif) -->
+
+## Why?
+
+Ever needed to recall what you worked on yesterday for a standup? Tired of running `git log` across a dozen repos? **daily-summary** scans all your local repositories and builds a single markdown report of your day — like a personal git activity report.
+
+- Prepare **daily standup notes** in seconds
+- Generate an **AI-powered work summary** grouped by theme, not repo
+- Keep a searchable **developer journal** of your daily output
+- Track work across **multiple git repos** with one command
 
 ## Install
 
@@ -203,6 +217,10 @@ These commit patterns are automatically excluded:
 - **Optional:** [`claude`](https://claude.ai/code) CLI for `--ai` mode
 - **Optional:** [`glow`](https://github.com/charmbracelet/glow) for rendered markdown — `brew install glow`
 - Works on macOS and Linux
+
+## Keywords
+
+`git log summary` · `daily standup tool` · `git activity report` · `commit summary CLI` · `developer daily journal` · `what did I work on today` · `git-standup alternative` · `multi-repo git log` · `AI commit summary` · `Claude Code CLI`
 
 ## License
 
